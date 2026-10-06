@@ -1,6 +1,6 @@
 import json
 import pandas as pd
-from google import genai
+import requests
 import streamlit as st
 
 st.set_page_config(
@@ -13,13 +13,12 @@ st.write(
     " generate dynamic charts."
 )
 
-# Configure Gemini API Key securely using the modern client
+# Get API Key from Streamlit Secrets
 try:
   api_key = st.secrets["GEMINI_API_KEY"]
-  client = genai.Client(api_key=api_key)
 except Exception as e:
   st.error("API Key missing from Streamlit Secrets.")
-  client = None
+  api_key = None
 
 uploaded_file = st.file_uploader(
     "Upload your dataset (CSV, Excel or JSON)", type=["csv", "xlsx", "json"]
@@ -45,7 +44,7 @@ if uploaded_file is not None:
       "Ask a question (e.g., 'Show average bmi by diabetes outcome'):"
   )
 
-  if user_query and client:
+  if user_query and api_key:
     with st.spinner("Analyzing data structure and generating insights..."):
       schema_info = df.dtypes.to_string()
       full_data_text = df.to_string()
@@ -76,39 +75,49 @@ if uploaded_file is not None:
             Return ONLY valid JSON. No markdown code blocks, just raw JSON string.
             """
 
+      # Direct REST API call to Gemini
+      url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+      headers = {"Content-Type": "application/json"}
+      payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
       try:
-        response = client.models.generate_content(
-            model="gemini-1.5-flash", contents=prompt
-        )
-        raw_text = response.text.strip()
+        res = requests.post(url, headers=headers, json=payload)
+        res_json = res.json()
 
-        if raw_text.startswith("```json"):
-          raw_text = raw_text[7:]
-        if raw_text.endswith("```"):
-          raw_text = raw_text[:-3]
+        if "error" in res_json:
+          st.error(f"API Error: {res_json['error'].get('message')}")
+        else:
+          raw_text = (
+              res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+          )
 
-        result_json = json.loads(raw_text.strip())
+          if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+          if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
 
-        st.success("### Analysis Result")
-        st.write(result_json.get("text_response"))
+          result_json = json.loads(raw_text.strip())
 
-        if result_json.get("is_chart_data") and result_json.get("data"):
-          chart_df = pd.DataFrame(result_json["data"])
-          if not chart_df.empty:
-            chart_df = chart_df.set_index("x_value")
-            st.subheader("📈 Generated Visualisation")
+          st.success("### Analysis Result")
+          st.write(result_json.get("text_response"))
 
-            chart_type = result_json.get("chart_type", "bar")
-            if chart_type == "line":
-              st.line_chart(chart_df)
-            else:
-              st.bar_chart(chart_df)
+          if result_json.get("is_chart_data") and result_json.get("data"):
+            chart_df = pd.DataFrame(result_json["data"])
+            if not chart_df.empty:
+              chart_df = chart_df.set_index("x_value")
+              st.subheader("📈 Generated Visualisation")
+
+              chart_type = result_json.get("chart_type", "bar")
+              if chart_type == "line":
+                st.line_chart(chart_df)
+              else:
+                st.bar_chart(chart_df)
 
       except json.JSONDecodeError:
         st.warning(
             "The model responded with plain text instead of JSON. Here is the"
             " raw output:"
         )
-        st.write(response.text)
+        st.write(raw_text)
       except Exception as e:
         st.error(f"An error occurred: {e}")
