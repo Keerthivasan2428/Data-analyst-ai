@@ -1,7 +1,6 @@
-import importlib
 import json
-import google.generativeai as genai
 import pandas as pd
+from google import genai
 import streamlit as st
 
 st.set_page_config(
@@ -14,14 +13,13 @@ st.write(
     " generate dynamic charts."
 )
 
-# Configure Gemini API Key securely
+# Configure Gemini API Key securely using the modern client
 try:
   api_key = st.secrets["GEMINI_API_KEY"]
-  genai.configure(api_key=api_key)
-  model = genai.GenerativeModel("gemini-3.8-flash")
+  client = genai.Client(api_key=api_key)
 except Exception as e:
   st.error("API Key missing from Streamlit Secrets.")
-  model = None
+  client = None
 
 uploaded_file = st.file_uploader(
     "Upload your dataset (CSV, Excel or JSON)", type=["csv", "xlsx", "json"]
@@ -35,10 +33,6 @@ if uploaded_file is not None:
   else:
     df = pd.read_json(uploaded_file)
 
-  # Safe data cleaning for AY column
-  if "AY" in df.columns:
-    df["AY"] = pd.to_numeric(df["AY"], errors="coerce")
-
   st.subheader("📋 Dataset Preview & Schema")
   st.dataframe(df.head())
 
@@ -48,16 +42,14 @@ if uploaded_file is not None:
   )
 
   user_query = st.text_input(
-      "Ask a question (e.g., 'Show total revenue by region as a bar chart'):"
+      "Ask a question (e.g., 'Show average bmi by diabetes outcome'):"
   )
 
-  if user_query and model:
+  if user_query and client:
     with st.spinner("Analyzing data structure and generating insights..."):
-      # 1. Capture Schema Information
       schema_info = df.dtypes.to_string()
       full_data_text = df.to_string()
 
-      # 2. Text Response Prompt
       prompt = f"""
             You are an expert data analyst. 
             
@@ -69,15 +61,54 @@ if uploaded_file is not None:
             
             USER QUESTION: {user_query}
             
-            Analyze the dataset and provide a clear, detailed text response answering the user question.
+            Analyze the dataset and return a VALID JSON object with this exact structure:
+            {{
+              "text_response": "Detailed text analysis answering the user question.",
+              "is_chart_data": true or false,
+              "chart_type": "bar" or "line" or "none",
+              "x_column": "exact column name for X axis or null",
+              "y_column": "exact column name for Y axis or null",
+              "data": [
+                {{"x_value": "Category1", "y_value": 100}},
+                {{"x_value": "Category2", "y_value": 250}}
+              ]
+            }}
+            Return ONLY valid JSON. No markdown code blocks, just raw JSON string.
             """
 
       try:
-        response = model.generate_content(prompt)
-        
-        # Display Text Answer
-        st.success("### Analysis Result")
-        st.write(response.text)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash", contents=prompt
+        )
+        raw_text = response.text.strip()
 
+        if raw_text.startswith("```json"):
+          raw_text = raw_text[7:]
+        if raw_text.endswith("```"):
+          raw_text = raw_text[:-3]
+
+        result_json = json.loads(raw_text.strip())
+
+        st.success("### Analysis Result")
+        st.write(result_json.get("text_response"))
+
+        if result_json.get("is_chart_data") and result_json.get("data"):
+          chart_df = pd.DataFrame(result_json["data"])
+          if not chart_df.empty:
+            chart_df = chart_df.set_index("x_value")
+            st.subheader("📈 Generated Visualisation")
+
+            chart_type = result_json.get("chart_type", "bar")
+            if chart_type == "line":
+              st.line_chart(chart_df)
+            else:
+              st.bar_chart(chart_df)
+
+      except json.JSONDecodeError:
+        st.warning(
+            "The model responded with plain text instead of JSON. Here is the"
+            " raw output:"
+        )
+        st.write(response.text)
       except Exception as e:
         st.error(f"An error occurred: {e}")
